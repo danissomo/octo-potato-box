@@ -25,7 +25,7 @@ class PositionHystrory:
         self.hystory = deque(maxlen=maxlen)
         self._time = "time"
         self._pose = "pose"
-        self.timer = rospy.Timer(rospy.Duration(nsecs=1), self.callback)
+        self.timer = rospy.Timer(rospy.Duration(0.01), self.callback)
         
 
     def callback(self, arg):
@@ -35,18 +35,25 @@ class PositionHystrory:
         br = tf.TransformBroadcaster()
         cur_time = rospy.get_rostime()
         try:
+            def ur_axis_angle_to_quat(axis_angle):
+                # https://en.wikipedia.org/wiki/Axis%E2%80%93angle_representation#Unit_quaternions
+                angle = np.linalg.norm(axis_angle)
+                axis_normed = [axis_angle[0]/angle, axis_angle[1]/angle, axis_angle[2]/angle]
+                s = math.sin(angle/2)
+                return [s*axis_normed[0], s*axis_normed[1], s*axis_normed[2], math.cos(angle/2)]
+            t = rospy.Time.now()
             br.sendTransform(
                 (manipulatorPose[0], manipulatorPose[1], manipulatorPose[2]),
-                list(Rotation.from_rotvec(manipulatorPose[3:]).as_quat() ),
-                cur_time,
+                ur_axis_angle_to_quat(manipulatorPose[3:]) ,
+                t,
                 "ur_gripper",
                 "ur_arm_base"
             )
 
             br.sendTransform(
                 ParamProvider.rs_frame,
-                (0, 0, 0, 1),
-                cur_time,
+                list(Rotation.from_euler("xyz", [0, 0, 0]).as_quat()),
+                t,
                 ParamProvider.rs_frame_name,
                 "ur_gripper",
             )

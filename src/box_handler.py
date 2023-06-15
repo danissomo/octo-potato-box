@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 from point_cloud import Realsense2PointCloud
-from aruco_localization.msg import aruco_msg
+from aruco_localization_v2.msg import aruco_array_msg, aruco_msg
 import rospy
 from arguments import Args
 import objects
@@ -10,21 +10,16 @@ import copy
 from sensor_msgs.msg import PointCloud
 class BoxHandler(Realsense2PointCloud):
     def __init__(self):
-        super().__init__(frame="map")
-        self.aruco_sub = rospy.Subscriber(Args.aruco_tn, aruco_msg, self.aruco_callback, queue_size = 2)
+        super().__init__(frame="rs_camera")
+        self.aruco_sub = rospy.Subscriber(Args.aruco_tn, aruco_array_msg, self.aruco_callback, queue_size = 10)
         self.box : objects.Box = None
         self.table : objects.Table = None
-        self.box_xy_plane : objects.Plane = None
-        self.table_xy_plane : objects.Plane = None
-        self.box_ids = (1, 2, 3)
+        self.actualId = None
+        self.box_ids = {i for i in range(15)}
+        self.boxes = dict()
         self.box_pub = rospy.Publisher("/box/pc", PointCloud, queue_size=10)
-
-    
-    def aruco_callback(self, ar_msg : aruco_msg):
-        if not  ar_msg.arucoId in self.box_ids:
-            return
-        if self.semaphore:
-            return
+        
+    def process_aruco_msg(self, ar_msg : aruco_msg):
         '''
         aruco 
                  y   
@@ -33,71 +28,163 @@ class BoxHandler(Realsense2PointCloud):
           x v.....|
             3---->2
         '''
+        
         p32_as_np = lambda p: np.array([p.x, p.y, p.z])
         points_as_np = [p32_as_np(v) for v in ar_msg.points]
         x_vec = points_as_np[3] - points_as_np[0]
+        x_vec /= np.linalg.norm(x_vec)
         y_vec = points_as_np[1] - points_as_np[0]
+        y_vec /= np.linalg.norm(y_vec)
         z_vec = np.cross(x_vec, y_vec)
+        z_vec /= np.linalg.norm(z_vec)
         box  =objects.Box(
-            position = np.mean(points_as_np),
+            position = np.mean(points_as_np, axis=0),
             basis = np.array( [x_vec, y_vec, z_vec]),
             frame="rs_camera",
             sizes=(0, 0, 0), 
             plane=objects.Plane().FromPoints(*points_as_np[:3])
         )
-        if self.cv_pc is None:
-            rospy.sleep(1)
-            rospy.loginfo("none")
-            return
+        # rospy.loginfo("%s ", box.position)
+        br = tf.TransformBroadcaster()
+        from scipy.spatial.transform import Rotation
+        br.sendTransform(
+                box.position,
+                list(Rotation.from_matrix(box.basis).as_quat()),
+                rospy.Time.now(),
+                f"aruco_{ar_msg.arucoId}",
+                "rs_camera",
+            )
+        return box
     
-        point_cloud_cp = self.cv_pc.copy()
-        dist =  ((point_cloud_cp-box.plane.base_point) @ box.plane.normal)
-        pc_lower_then_box = point_cloud_cp[ dist <= 0.02]
+    def aruco_callback(self, ar_ar_msg = None):
+        buf = dict()
+        for ar_msg in ar_ar_msg.data:
+            if not  ar_msg.arucoId in self.box_ids:
+                continue
+            box = self.process_aruco_msg(ar_msg)
+            box =box.TransformToFrame(rospy.get_rostime(), "ur_arm_base", True)
+            rospy.loginfo(box.position)
+            buf[ar_msg.arucoId] = copy.copy(box)
+        self.boxes = copy.copy(buf)
+        return True
 
-        dist_2 = np.abs((pc_lower_then_box - box.plane.base_point) @ box.plane.normal)
-        table_points = pc_lower_then_box[ (dist_2 > 0.03) & (dist_2 < 0.25)]
-
-        rnd_indexes = [np.random.randint(table_points.shape[0]) for i in range(3)]
-        rand_points = np.array([
-            np.mean(table_points[r:r+6], axis=0)
-            for r in rnd_indexes
-        ])
-        table_plane = objects.Plane().FromPoints(*rand_points)
-        if table_plane.normal @ box.plane.normal < 0:
-            table_plane.normal *= -1
-        i = 0
-        while np.abs( table_plane.normal @ box.plane.normal ) <= 0.98:
-            rand_points = np.array([
-            np.mean(table_points[r:r+6], axis=0)
-            for r in rnd_indexes
-            ])
-            table_plane = objects.Plane().FromPoints(*rand_points)
-            i+=1
-            if i > 20: return
-
-        
-        box_point_cloud = pc_lower_then_box[((pc_lower_then_box - table_plane.base_point) @ table_plane.normal) >= 0]
-        box_plane_points = point_cloud_cp[np.abs((point_cloud_cp - box.plane.base_point) @ box.plane.normal) <= 0.05]
-        print(box_plane_points.shape, box_point_cloud.shape)
-        dist_to_box = np.abs((box.position - table_plane.base_point) @ table_plane.normal)
-        buf = box_plane_points.copy()
-        print(dist_to_box)
-        print(np.linalg.norm(box.plane.normal))
-        for t in np.linspace(0, 1, 5):
-            reconstructed_points = buf  - t*0.05*box.plane.normal
-            box_plane_points =  np.concatenate([reconstructed_points, box_plane_points]) 
-        
-        pointcloud = PointCloud()
-        pointcloud.header.frame_id = "map"
-        pointcloud.points = self.v_func(*(-box_plane_points.T))
-        #self.box = box.TransformToFrame(ar_msg.timeTag, "ur_arm_base", False)
-        self.box_pub.publish(pointcloud)
-        #pc_cv = self.v_func(box_point_cloud)
-
-if __name__ == "__main__":
-    rospy.init_node('test_box_pc')
+    def get_aruco(self):
+        t = rospy.Rospy.now()
+        ar_msg = rospy.wait_for_message(Args.aruco_tn, aruco_msg)
+        if not  ar_msg.arucoId in self.box_ids:
+            return None
+        self.actualId = ar_msg.arucoId
+        self.box = self.process_aruco_msg(ar_msg)
+        self.box = self.box.TransformToFrame(t, "ur_arm_base", True)
+        rospy.loginfo(self.box.position)
+        return copy.copy(self.box)
+    
+import tf
+def TransformVec(vec, from_frame, to_frame,  tf_listner, time):
+    from geometry_msgs.msg import Vector3Stamped, Vector3
+    from std_msgs.msg import Header
+    
+    vec_s = Vector3Stamped(
+        Header(
+            stamp = time,
+            frame_id = from_frame
+        ),
+        Vector3(*vec)
+    )
+    new_vec : Vector3Stamped =  tf_listner.transformVector3(to_frame, vec_s)
+    return np.array([new_vec.vector.x, new_vec.vector.y, new_vec.vector.z])
+    
+def TransformPoint(point, from_frame, to_frame, tf_listner, time):
+    from geometry_msgs.msg import PointStamped, Point
+    from std_msgs.msg import Header
+    point_s = PointStamped(
+        Header(
+            stamp = time,
+            frame_id = from_frame
+        ),
+        Point(*point)
+    )
+    new_point : PointStamped=  tf_listner.transformPoint(to_frame, point_s)
+    return np.array([new_point.point.x, new_point.point.y, new_point.point.z])
+if __name__ == "__main__": 
+    rospy.init_node('test_box_pc', log_level=rospy.DEBUG)
+    tf_listner = tf.TransformListener()
     from husky import Robot
     r = Robot("192.168.131.40")
+    def Cancel():
+        r.ActivateTeachMode()
+        r.OpenGripper()
+    rospy.on_shutdown(Cancel)
+    r.OpenGripper()
     bh = BoxHandler()
+    r.ActivateTeachMode()
+    r.DeactivateTeachMode()
+    #rospy.spin()
+    arucos_in_view = dict()
+    while len(bh.boxes) ==0 and not rospy.is_shutdown():
+        rospy.sleep(0.1)
+    # for i in range(10):
+    #     box = bh.get_aruco()
+    #     arucos_in_view[bh.actualId] = box
+    #     if len(arucos_in_view) > 2:
+    #         break 
+    base_id = list(bh.boxes)[0]
+    base_box = bh.boxes[base_id]
+    start_p = list(r.GetActualQ())
+    h = 0.06
+    for box in bh.boxes:
+        rospy.loginfo("box")
+        rospy.loginfo(bh.boxes[box].position)
+    cp_box = copy.copy(bh.boxes)
     
-    rospy.spin()
+    for key in cp_box:
+        # if key == base_id: # comment for test box
+        #     continue
+        cmd1 = cp_box[key].position  + 0.05 * cp_box[key].top_plane.normal
+        cmd2 = cp_box[key].position
+        cmd1 = list(cmd1) +  list(r.RotvecFromBasis([-cp_box[key].basis[0], cp_box[key].basis[1], -cp_box[key].basis[2]]))
+        cmd2 = list(cmd2) +  list(r.RotvecFromBasis([-cp_box[key].basis[0], cp_box[key].basis[1], -cp_box[key].basis[2]]))
+        r.MoveL         (list(cmd1), 0.5, 0.5)
+        r.MoveL         (list(cmd2), 0.5, 0.5)
+        rospy.logdebug(cmd1)
+        rospy.logdebug(cp_box[key].position)
+        rospy.logdebug(r.GetActualTCPPose())
+        r.CloseGripper  ()
+        r.MoveJ(start_p, 0.5, 0.5)
+    # # r.MoveJ([1.602, -2.869, 2.683, -2.869, -1.584, -0.001])
+    #     # #r.CloseGripper  ()
+    #     # input("next")
+    #     # r.MoveL         (list(cmd1), 0.5, 0.5)
+    #     cmd3 = base_box.position + h * base_box.top_plane.normal
+    #     cmd3 = list(cmd3) +  list(r.RotvecFromBasis([-base_box.basis[0], base_box.basis[1], -base_box.basis[2]]))
+    #     h+=0.02
+    #     # r.MoveJ(start_p, 0.5, 0.5)
+    #     # #r.MoveJ([-0.5200894514666956, -1.336278263722555, 0.785484790802002, -1.2737353483783167, -1.4993074576007288, 0.06180414929986], 0.5, 0.5)
+    #     r.MoveL         (list(cmd3), 0.5, 0.3)
+    #     r.OpenGripper()
+    #     r.MoveJ(start_p, 0.5, 0.5)
+    # t = rospy.get_rostime()
+    # cmd1 = bh.box.position + 0.05 * bh.box.top_plane.normal
+    # cmd2 = bh.box.position
+    # cmd3 = bh.box.position + 0.2 * bh.box.basis[0] +  0.05 * bh.box.top_plane.normal
+    # print(bh.box.basis)
+    # cmd1 = list(cmd1) +  list(r.RotvecFromBasis([-bh.box.basis[0], bh.box.basis[1], -bh.box.basis[2]]))
+    # cmd2 = list(cmd2) +  list(r.RotvecFromBasis([-bh.box.basis[0], bh.box.basis[1], -bh.box.basis[2]]))
+    # cmd3 = list(cmd3) +  list(r.RotvecFromBasis([-bh.box.basis[0], bh.box.basis[1], -bh.box.basis[2]]))
+    # start_p = list(r.GetActualQ())
+    # print(cmd1)
+    # if rospy.is_shutdown():
+    #     exit()
+    # r.MoveL         (list(cmd1), 0.1, 0.1)
+    # r.MoveL         (list(cmd2), 0.1, 0.1)
+    # r.CloseGripper  ()
+    # r.MoveJ         (start_p, 0.2, 0.2)
+    # a = r.GetActualQ()
+    # import math
+    # a[0] -= math.pi
+    # r.MoveJ(a, 0.2, 0.4)
+    # bh.get_aruco()
+    # cmd4  = list( bh.box.position + 0.3 * bh.box.top_plane.normal) + list(r.GetActualTCPPose()[3:])
+    # r.MoveL         (cmd4, 0.1, 0.1)
+    # r.OpenGripper   ()
+    # r.MoveJ         (start_p, 0.1, 0.1)

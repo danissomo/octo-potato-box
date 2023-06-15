@@ -11,7 +11,7 @@ from message_filters import TimeSynchronizer as TimeSync
 from message_filters import Subscriber as SyncSub
 import cv2
 class Realsense2PointCloud:
-    def __init__(self, frame = "map", topic = "/realsense/point_cloud") -> None:
+    def __init__(self, frame = "rs_camera", topic = "/realsense/point_cloud") -> None:
         self.semaphore = False
         self.pub = rospy.Publisher(topic, PointCloud, queue_size=5, tcp_nodelay=True)
         self.synchronizer = TimeSync(
@@ -40,7 +40,7 @@ class Realsense2PointCloud:
             return
         self.semaphore = True
         cv_img = np.frombuffer(color.data, dtype=np.uint8).reshape(color.height, color.width, -1)
-        cv_depth =  np.frombuffer(depth.data, dtype=np.uint16).reshape(depth.height, depth.width) * 0.001
+        cv_depth =  np.frombuffer(depth.data, dtype=np.uint16).reshape(depth.height, depth.width) / 1000.0
         
         if self.x_arr is None or self.y_arr is None:
             fx, _, cx, _, fy, cy, *_ = cam_info.K
@@ -59,7 +59,7 @@ class Realsense2PointCloud:
         if self.pc.points is None:
             self.pc.points = [0]*projected_x.size
         self.cv_pc = np.stack([projected_x, projected_y, cv_depth], axis=2).reshape(-1, 3)
-        self.pc.points = self.v_func(-projected_x.flatten(), -projected_y.flatten(), -cv_depth.flatten())
+        self.pc.points = self.v_func(projected_x.flatten(), projected_y.flatten(), cv_depth.flatten())
         #cv_img = cv_img.reshape(cv_img.shape[0]*cv_img.shape[1], cv_img.shape[2]) /256
         
         #self.pc.channels[0].values = cv_img[:,0]

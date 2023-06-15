@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>objects_manipulation</name>
+  <name>objects_manipulation_v2</name>
   <version>0.0.0</version>
   <description>The cubes_recognizer package</description>
 
@@ -66,6 +66,7 @@
   <exec_depend>stg_msgs</exec_depend>
   <exec_depend>cv_bridge_p3</exec_depend>
   <exec_depend>door_tests</exec_depend>
+  <exec_depend>aruco_localization_v2</exec_depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

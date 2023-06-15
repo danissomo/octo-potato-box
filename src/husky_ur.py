@@ -197,7 +197,7 @@ class HuskyUr:
         while (not rospy.is_shutdown()) and not (np.abs(np.array(self.GetActualTCPPose()[3:]) - newRot) < epsilon).all():
             diff = -np.array(self.GetActualTCPPose())[3:] + newRot
             f = [0, 0, 0] + list(10*diff[0])
-            print(diff[0])
+            rospy.loginfo(diff[0])
             self.ForceMode(self.GetActualTCPPose(), [*[0]*3, *[1]*3], f, 2, [*[2]*3, *[math.pi]*3])
             time.sleep(0.1)
 

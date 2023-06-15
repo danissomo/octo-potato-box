@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(objects_manipulation)
+project(objects_manipulation_v2)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
